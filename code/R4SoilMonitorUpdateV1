@@ -1,0 +1,667 @@
+#include <Preferences.h>
+
+
+
+#include <SPI.h>
+#include <WiFiS3.h>
+#include <NTPClient.h>
+#include <WiFiUdp.h>
+#include <time.h>
+
+#include <ArduinoJson.h>
+
+
+Preferences preferences;
+
+
+
+char ssid[40];
+char pass[40]; 
+int status = WL_IDLE_STATUS;    
+
+//unsigned long lastTempCheck;
+WiFiUDP ntpUDP;
+NTPClient timeClient(ntpUDP, "pool.ntp.org", -18000, 60000);
+bool isWifiConnected;
+unsigned long epochTime;
+unsigned long startTime;
+unsigned long INTERVAL = 10000;
+unsigned long TEMPINTERVAL = 180000;
+long timezoneoffset;
+bool isOpen = false;
+char fullTime[80];
+String stringTime ="";
+char tempCheckTime[80];
+
+WiFiServer server(80);
+int percentageHumidity;
+unsigned long moistureCheckTime;
+String SSID="";
+String Password="";
+String strIPAddress="";
+String Mask="";
+String Gateway="";
+String DNS1="";
+String DNS2="";
+String homePage = "";
+int zoneCount;
+String zone[6];
+int enabled[6];
+String nickname[6];
+int wet[6];
+int dry[6];
+int trip[6];
+int runtime[6];
+byte analogPins[]={A0,A1,A2,A3,A4,A5};
+int digitalPins[]={0,1,2,3,4,5};
+int currentMoisture[6];
+int valveStatus[]={0,0,0,0,0,0};
+int needsWater[6];
+int openValve=0;
+String lastWatered[6];
+const char* zoneKeys[] ={"zone0","zone1","zone2","zone3","zone4","zone5"};
+const char* nicknameKeys[] ={"nickname0","nickname1","nickname2","nickname3","nickname4","nickname5"};
+const char* zoneenabledKeys[] ={"enabled0","enabled1","enabled2","enabled3","enabled4","enabled5"};
+const char* zonewetKeys[] = {"wet0","wet1","wet2","wet3","wet4","wet5"};
+const char* zonedryKeys[] = {"dry0","dry1","dry2","dry3","dry4","dry5"};
+const char* zonetripKeys[] ={"trip0","trip1","trip2","trip3","trip4","trip5"};
+const char* zoneruntimeKeys[] ={"runtime0","runtime1","runtime2","runtime3","runtime4","runtime5"};
+const char* zonelastwateredKeys[] ={"lastwatered0","lastwatered1","lastwatered2","lastwatered3","lastwatered4","lastwatered5"};
+/*
+    zone[zones] = preferences.getString("zone" + zones);
+    enabled[zones] = preferences.getInt("enabled"+ zones);
+    nickname[zones] = preferences.getString("nickname"+ zones);
+    wet[zones] = preferences.getInt("wet"+ zones,22);
+    dry[zones] = preferences.getInt("dry"+ zones,100);
+    trip[zones] = preferences.getInt("trip"+ zones);
+    runtime[zones] = preferences.getInt("runtime"+ zones);
+    lastWatered[zones]= preferences.getString("lastWatered" + zones);
+*/
+
+void setup() {
+Serial.begin(9600);
+delay(1000);
+getSavedConfig();
+if (SSID == NULL || SSID =="" || SSID =="null"){
+    SSID = "Garden";
+    Password = "123412341234";
+    
+    Gateway="0,0,0,0";
+    DNS1="0,0,0,0";
+    DNS2="0,0,0,0";
+}
+strIPAddress.replace(".",",");
+Mask.replace(".",",");
+Gateway.replace(".",",");
+DNS1.replace(".",",");
+DNS2.replace(".",",");
+isWifiConnected = connectWifi(SSID,Password);
+timeClient.setTimeOffset(timezoneoffset * 3600);
+timeClient.begin();
+for (int pin =0;pin<zoneCount;pin++){
+pinMode(digitalPins[pin], OUTPUT);
+digitalWrite(digitalPins[pin], LOW);
+}
+delay(100);
+getZoneMoisture();
+stringTime = getTime();
+Serial.println("Starting");
+}
+
+
+
+void loop() {
+if (millis() - moistureCheckTime >= INTERVAL){
+  getZoneMoisture();
+  stringTime = getTime();
+  
+}
+  if (isWifiConnected == false){
+    isWifiConnected = connectWifi(SSID,Password);
+  }
+
+if (isOpen==false) {
+  for (int zone = 0;zone<zoneCount;zone++){
+    if (needsWater[zone]==1 && enabled[zone]==1){
+    isOpen=true;
+    startTime = millis();
+    digitalWrite(digitalPins[zone], HIGH);
+    valveStatus[zone]=1;
+    openValve = zone;
+      stringTime = getTime();
+      lastWatered[openValve]=fullTime;
+      preferences.begin("setup",false);
+      preferences.putString("lastWatered"+openValve,String(fullTime));
+      delay(500);
+      preferences.end();
+      Serial.println("LastWatered " + lastWatered[openValve]);      
+    break;
+    }
+  }
+ }
+  if (isOpen == true){
+    if (millis() - startTime >= (unsigned int)(runtime[openValve]*60000)){
+      digitalWrite(digitalPins[openValve],LOW);
+      valveStatus[openValve]=0;
+      openValve =7;
+      isOpen=false;
+    }
+  }
+
+   WiFiClient client = server.available();   // listen for incoming clients
+    if (client) { 
+    Serial.println("new client");           // print a message out the serial port
+    String currentLine = "";                // make a String to hold incoming data from the client
+    while (client.connected()) {            // loop while the client's connected
+      if (client.available()) {             // if there's bytes to read from the client,
+        char c = client.read();
+        if (c != '\r') {  
+        if (currentLine.length() < 1000) {
+          currentLine += c; 
+        }
+      }
+
+        if (c == '\n') {      
+            client.println("HTTP/1.1 200 OK");
+            client.println("Content-type:text/html");
+            client.println();
+
+        if (currentLine.length()==0 || currentLine.startsWith("GET /Home") || currentLine.startsWith("GET /home")){
+            getBasicPage(client);
+        }  
+        if (currentLine.startsWith("GET /setup")) {
+              getSetupPage(client);
+          }
+          if (currentLine.startsWith("GET /wifi")){
+              getWifiSetup(client);
+          }   
+          if(currentLine.startsWith("GET /savewifi")){
+            saveWiFiData(client, currentLine);
+            } 
+            //saveWiFiData(client);
+
+          if(currentLine.startsWith("GET /allzoneinfo")){
+            getZoneInfo(client);
+          }
+          if(currentLine.startsWith("Get /zoneinfo")){
+            int zoneIndex = currentLine.indexOf("zone=")+1;
+            int selectedZone = currentLine.charAt(zoneIndex);
+            getZoneInfo(client,selectedZone);
+          }
+          if(currentLine.indexOf("addzone")>0){
+            addZone(client);
+          }
+          if(currentLine.indexOf("editzone")>0){
+            int zonestart = currentLine.indexOf("zone=")+5;
+            int thiszone = currentLine.substring(zonestart,zonestart+1).toInt();
+            getZoneInfo(client,thiszone);
+          }
+          if(currentLine.indexOf("saveselectedZone")>0){
+            saveselectedZone(client, currentLine);
+          }
+          if(currentLine.indexOf("testsensor")>0){
+              int StartSensor = currentLine.indexOf("sensor=")+7;
+              int EndSensor = currentLine.indexOf("&");
+              int StartType = currentLine.indexOf("type=")+5;
+              int EndType = currentLine.indexOf(" ", StartType+1);
+              int Sensor = currentLine.substring(StartSensor, EndSensor).toInt();
+              String Type = currentLine.substring(StartType, EndType);
+              testSensor(Sensor, Type);
+              getZoneInfo(client,Sensor);
+          }
+          if (currentLine.indexOf("switchvalve")>0){
+            int startValve = currentLine.indexOf("valve=")+6;
+            int valve = currentLine.substring(startValve,startValve+1).toInt();
+            switchValve(valve);
+            getBasicPage(client);
+          }
+
+
+    getPageFooter(client);
+    delay(1000);
+    client.stop();
+    Serial.println("client disconnected");
+    }
+    // close the connection:
+                  }
+  }
+  }
+  }
+
+   //delay(1000);
+
+
+void getBasicPage(WiFiClient client) 
+{
+  client.println("<script  type=\"text/javascript\">setTimeout(() => {window.location.href =\"/home\" ;}, 10000);</script>");          
+  client.println("Current Time: ");
+  client.println(stringTime);
+  client.println("</br>");
+ client.println("<table style=""width: 100%;"" border=""2""><thead><tr><td>Zone</td><td>Moisture Content</td><td>Valve Status</td><td>Open/Close Valve</td><td>Last Watered</td></tr></thead>");
+
+for (int zone =0;zone<zoneCount;zone++){
+   client.println("<tr>");
+  
+    client.println("<td style=""width: 30%; border-color: black; height: 21.5px; text-align: right;"">" + nickname[zone] + "</td>");
+        client.println("<td style=""width: 20%; border-color: black; height: 21.5px; text-align: center;"">" + String(currentMoisture[zone]) + "%</td>"); 
+        if (valveStatus[zone]==1){
+            client.println("<td style=""width: 15%; border-color: black; height: 21.5px; text-align: right;"">Open</td>");
+            client.println("<td style=""width: 15%; border-color: black; height: 21.5px; text-align: right;""><a href = /switchvalve?valve=" + String(zone) + ">Close this valve</a></td>");
+          }
+          else{
+            client.println("<td style=""width: 15%; border-color: black; height: 21.5px; text-align: right;"">Closed</td>");
+            client.println("<td style=""width: 15%; border-color: black; height: 21.5px; text-align: right;""><a href = /switchvalve?valve=" + String(zone) + ">Open this valve</a></td>");
+          }  
+
+    client.println("<td style=""width: 20%; border-color: black; height: 21.5px; text-align: right;"">" + lastWatered[zone] + "</td>");
+    Serial.println("Last Watered " + lastWatered[zone]);
+ 
+  client.println("</tr>");
+}
+client.println("</table");
+
+} 
+void getSetupPage(WiFiClient client){
+client.println("<b>SETUP PAGE</b></br></br>");
+client.println("<a href =""/wifi"">Setup Wifi</a></br>");
+client.println("<a href =""/allzoneinfo"">Setup Zones</a></br>");
+
+
+}
+void getPageFooter(WiFiClient client){
+client.println("</br>");
+client.print("<p><a href=""/home"">Home</a>");
+client.print("     ");
+client.println("<a href=""/setup"">Setup</a></p>");
+}
+void getWifiSetup(WiFiClient client){
+
+Serial.println("Setting up Wifi");
+client.println("<form action=""/savewifi.html"">");
+client.println("<p><label for=""SSID"">Enter the WIFI SSID </p>");
+client.println("<input type=""text"" id=""SSID"" name=""SSID"" rows=""1"" size=""50"" value=" + (SSID!="null"?SSID:"") +"></br>");
+client.println("<p><label for =""Password"">Enter the Wifi Password</label></p>");
+client.println("<input type=""text"" id=""Password"" name=""Password"" rows=""1"" size=""50"" value=" + (Password!="null"?Password:"") + "></br>");
+client.println("<p><label for =""IPAddress"">Enter the Static IP</label></p>");
+client.println("<input type=""text"" id=""IPAddress"" name=""IPAddress"" rows=""1"" size=""50"" value =" + (strIPAddress!="null"?strIPAddress:"") +"></br>");
+client.println("<p><label for =""Mask"">Enter the Subnet Mask</label></p>");
+client.println("<input type=""text"" id=""Mask"" name=""Mask"" rows=""1"" size=""50"" value ="+ (Mask!="null"?Mask:"") +"></br>");
+client.println("<p><label for =""Gateway"">Enter the Default Gateway</label></p>");
+client.println("<input type=""text"" id=""Gateway"" name=""Gateway"" rows=""1"" size=""50"" value =" + (Gateway!="null"?Gateway:"") +"></br>");
+client.println("<p><label for =""DNS1"">Enter the primary DNS Server</label></p>");
+client.println("<input type=""text"" id=""DNS1"" name=""DNS1"" rows=""1"" size=""50"" value="+ (DNS1!="null"?DNS1:"") +"></br>");
+client.println("<p><label for =""DNS2"">Enter the secondary DNS Server</label></p>");
+client.println("<input type=""text"" id=""DNS2"" name=""DNS2"" rows=""1"" size=""50"" value=" + (DNS2!="null"?DNS2:"") +"></br>");
+client.println("<p><label for =""offset"">Enter the Time Zone Offset (CST is -6)</label></p>");
+client.println("<input type=""text"" id=""offset"" name=""offset"" rows=""1"" size=""50"" value=" +  String(timezoneoffset) +"></br>");
+client.println("<br><input type=""submit"" value=""Submit""><input type=""cancel"" value = ""cancel""></form>");
+}
+
+void saveWiFiData(WiFiClient client, String currentLine){
+client.println("Saving Config and rebooting device </br>");
+client.println("<script  type=\"text/javascript\">setTimeout(() => {window.location.href =\"/home\" ;}, 10000);</script>");
+    getPageFooter(client);
+    client.stop();
+     if(currentLine.indexOf("SSID=")>-1){
+              int StartSSID = currentLine.indexOf("SSID=")+5;
+              int EndSSID = currentLine.indexOf("&");
+              int StartPass = currentLine.indexOf("Password=")+9;
+              int EndPass = currentLine.indexOf("&", StartPass+1);
+              int StartIPAddress = currentLine.indexOf("IPAddress=")+10;
+              int EndIPAddress = currentLine.indexOf("&", StartIPAddress+1);
+              int StartMask = currentLine.indexOf("Mask=")+5;
+              int EndMask = currentLine.indexOf("&",StartMask);
+              int StartGateway = currentLine.indexOf("Gateway=")+8;
+              int EndGateway = currentLine.indexOf("&", StartGateway+1);
+              int StartDNS1 = currentLine.indexOf("DNS1=")+5;
+              int EndDNS1 = currentLine.indexOf("&", StartDNS1+1);
+              int StartDNS2 = currentLine.indexOf("DNS2=")+5;
+              int EndDNS2 = currentLine.indexOf("&", StartDNS2+1);
+              int startoffset = currentLine.indexOf("offset=")+7;
+              int endoffset = currentLine.indexOf(" ",startoffset+1);
+              SSID = currentLine.substring(StartSSID, EndSSID);
+              Password = currentLine.substring(StartPass, EndPass);
+              strIPAddress = currentLine.substring(StartIPAddress, EndIPAddress);
+              Mask = currentLine.substring(StartMask, EndMask);
+              Gateway = currentLine.substring(StartGateway, EndGateway);
+              DNS1 = currentLine.substring(StartDNS1, EndDNS1);
+              DNS2 = currentLine.substring(StartDNS2, EndDNS2);
+              timezoneoffset = currentLine.substring(startoffset, endoffset).toInt();
+              Serial.println("timeoffset = " + String(timezoneoffset));
+              
+              updateRunningConfig();
+
+
+}
+}
+
+void getZoneInfo(WiFiClient client){
+  client.println("<table style=""width: 100%;"" border=""2""><thead><tr><td>Zone</td><td>Nickname</td><td>Enabled</td><td>Wet Reading</td><td>Dry Reading</td><td>% Min Allowed Moisture Content</td><td>Drip Cycle Time</td><td>Edit</td></tr></thead>");
+  for (int zonecounter = 0;zonecounter < zoneCount;zonecounter++){
+    client.println("<tr>");
+    client.println("<td style=""width: 15%; border-color: black; height: 21.5px; text-align: right;"">" + zone[zonecounter] + "</td>");    
+    client.println("<td style=""width: 15%; border-color: black; height: 21.5px; text-align: right;"">" + nickname[zonecounter] + "</td>");
+    client.println("<td style=""width: 10%; border-color: black; height: 21.5px; text-align: right;"">" + (String)enabled[zonecounter] + "</td>");
+    client.println("<td style=""width: 10%; border-color: black; height: 21.5px; text-align: right;"">" + (String)wet[zonecounter] + "</td>");
+    client.println("<td style=""width: 10%; border-color: black; height: 21.5px; text-align: right;"">" + (String)dry[zonecounter] + "</td>");
+    client.println("<td style=""width: 10%; border-color: black; height: 21.5px; text-align: right;"">" + (String)trip[zonecounter] + "</td>");  
+    client.println("<td style=""width: 10%; border-color: black; height: 21.5px; text-align: right;"">" + (String)runtime[zonecounter] + "</td>"); 
+    client.println("<td style=""width: 10%; border-color: black; height: 21.5px; text-align: right;""><a href =""editzone?zone=" + String(zonecounter)  + """>Edit Zone</td>"); 
+    client.println("</tr>");
+  }
+  client.println("</table>");
+  if(zoneCount<6){
+    client.println("<a href=""/addzone"">Add a Zone</a></p>");
+  }
+}
+
+void getZoneInfo(WiFiClient client, int selectedZone){
+  client.println(zone[selectedZone]);
+  client.println("<form action=""/saveselectedZone"">");
+  client.print("<input type=""hidden"" id=""selectedzone"" name = ""selectedzone"" rows=""1"" size=""50"" value =" + String(selectedZone) + "></br>");
+  client.println("<p><label for=""nickname"">Enter the Nickname for the zone </p>");
+  client.println("<input type=""text"" id=""nickname"" name=""nickname"" rows=""1"" size=""50"" value=" + nickname[selectedZone] +"></br>");
+  client.println("<p><label for =""wet"">Enter wet reading</label></p>");
+  client.println("<input type=""text"" id=""wet"" name=""wet"" rows=""1"" size=""50"" value =" + String(wet[selectedZone]) +"></br>");
+  client.println("<a href =""testsensor?sensor=""" + String(selectedZone) +"&type=wet>Wet Test</a>");
+  client.println("<p><label for =""dry"">Enter dry reading</label></p>");
+  client.println("<input type=""text"" id=""dry"" name=""dry"" rows=""1"" size=""50"" value ="+ String(dry[selectedZone]) +"></br>");
+  client.println("<a href =""testsensor?sensor=""" + String(selectedZone) +"&type=dry>Dry Test</a>");
+  client.println("<p><label for =""enabled"">Enabled=1, Disabled = 0</label></p>");
+  client.println("<input type=""text"" id=""enabled"" name=""enabled"" rows=""1"" size=""50"" value=" + String(enabled[selectedZone]) + "></br>");
+  client.println("<p><label for =""trip"">Enter min soil moisture setting</label></p>");
+  client.println("<input type=""text"" id=""trip"" name=""trip"" rows=""1"" size=""50"" value =" + String(trip[selectedZone]) +"></br>");
+  client.println("<p><label for =""runtime"">How long to run sprinkler</label></p>");
+  client.println("<input type=""text"" id=""runtime"" name=""runtime"" rows=""1"" size=""50"" value="+ String(runtime[selectedZone]) +"></br>");
+  client.println("<br><input type=""submit"" value=""Save""><button type=""button"">Cancel</button></form>");
+
+}
+void testSensor(int sensor, String type){
+  int sensorVal=0;
+  int average=0;
+    for(int y=0;y<9;y++){
+    sensorVal =+ analogRead(analogPins[sensor]);
+    delay(100);   
+    }  
+  average = (int)sensorVal/10;
+  Serial.print(type);
+
+
+  if (type.equals("wet")){    
+    wet[sensor]= average;    
+  }
+  if (type.equals("dry")){
+    dry[sensor]=average;
+  }
+}
+void saveselectedZone(WiFiClient client, String currentLine){
+client.println("Saving Config and rebooting device </br>");
+client.println("<script  type=\"text/javascript\">setTimeout(() => {window.location.href =\"/home\" ;}, 10000);</script>");
+    getPageFooter(client);
+    client.stop();
+             if(currentLine.indexOf("selectedzone=")>-1){
+              int StartselectedZone = currentLine.indexOf("selectedzone=")+13;
+              int EndSelectedZone= currentLine.indexOf("&");
+              int StartNickname = currentLine.indexOf("nickname=")+9;
+              int EndNickname = currentLine.indexOf("&", StartNickname);
+              int StartWet = currentLine.indexOf("wet=")+4;
+              int EndWet = currentLine.indexOf("&",StartWet);
+              int StartDry = currentLine.indexOf("dry=")+4;
+              int EndDry = currentLine.indexOf("&", StartDry);
+              int StartEnabled = currentLine.indexOf("enabled=")+8;
+              int EndEnabled = currentLine.indexOf("&", StartEnabled);
+              int StartTrip = currentLine.indexOf("trip=")+5;
+              int EndTrip = currentLine.indexOf("&", StartTrip);
+              int StartRuntime = currentLine.indexOf("runtime=")+8;
+              int EndRuntime = currentLine.indexOf(" ", StartRuntime);
+              int selectedZone = currentLine.substring(StartselectedZone, EndSelectedZone).toInt();
+              nickname[selectedZone] = currentLine.substring(StartNickname, EndNickname);
+              wet[selectedZone] = currentLine.substring(StartWet, EndWet).toInt();
+              dry[selectedZone] = currentLine.substring(StartDry, EndDry).toInt();
+              enabled[selectedZone] = currentLine.substring(StartEnabled, EndEnabled).toInt();
+              trip[selectedZone] = currentLine.substring(StartTrip, EndTrip).toInt();
+              runtime[selectedZone] = currentLine.substring(StartRuntime, EndRuntime).toInt();
+              updateRunningConfig();
+
+}
+}
+void addZone(WiFiClient client){
+  if (zoneCount < 6){
+    zone[zoneCount] =  "Zone" + (String)(zoneCount + 1);    
+    nickname[zoneCount]="";
+    enabled[zoneCount]=0;
+    wet[zoneCount] =0;
+    dry[zoneCount]=0;
+    trip[zoneCount] =0;  
+    runtime[zoneCount] =0;  
+    zoneCount ++;    
+  }
+  getZoneInfo(client, zoneCount-1);
+}
+
+void printCurrentNet() {
+  byte bssid[6];
+  WiFi.BSSID(bssid);
+  Serial.print("BSSID: ");
+
+
+  // print the received signal strength:
+  long rssi = WiFi.RSSI();
+  Serial.print("signal strength (RSSI):");
+  Serial.println(rssi);
+
+  // print the encryption type:
+  byte encryption = WiFi.encryptionType();
+  Serial.print("Encryption Type:");
+  Serial.println(encryption, HEX);
+  Serial.println();
+  Serial.print("IP Address: ");
+  Serial.println(WiFi.localIP());
+  Serial.println(WiFi.gatewayIP());
+}
+bool connectWifi(String ssid, String pass){
+  bool connected = false;
+  char ssidchar[ssid.length()+1];
+  ssid.toCharArray(ssidchar, ssid.length()+1);
+ char passchar[pass.length()+1];
+ pass.toCharArray(passchar, pass.length()+1);
+ if (ssid=="Garden"){
+  connected = connectAP(ssid,pass);
+  Serial.println(connected);
+  }
+  else{
+    for (int counter = 0 ; counter < 3 ; counter++){
+    strIPAddress.replace("%2C",".");
+    strIPAddress.replace(",",".");
+    Serial.println(strIPAddress);
+    IPAddress IP;
+    IP.fromString(strIPAddress);
+    Serial.println(IP);
+    Mask.replace("%2C",".");
+    Mask.replace(",",".");
+    IPAddress mask;
+    mask.fromString(Mask);
+    Gateway.replace("%2C",".");
+    Gateway.replace(",",".");
+    IPAddress gateway;
+    gateway.fromString(Gateway);
+    DNS1.replace("%2C",".");
+    DNS1.replace(",",".");
+    IPAddress DNS;
+    DNS.fromString(DNS1);
+    DNS2.replace("%2C",".");
+    WiFi.config(IP, DNS, gateway, mask);
+    status = WiFi.begin(ssidchar,passchar);
+    Serial.println(status);
+    if (status == WL_CONNECTED)  {
+    server.begin(); 
+    printCurrentNet();
+    connected= true;
+    break;
+  }
+  }
+  
+  }
+  if (connected == false){
+    connected = connectAP("Garden","123412341234");
+  }
+return connected;
+}
+  bool connectAP(String ssid, String pass){
+  bool connected = false;
+  char ssidchar[ssid.length()+1];
+  ssid.toCharArray(ssidchar, ssid.length()+1);
+  char passchar[pass.length()+1];
+  pass.toCharArray(passchar, pass.length()+1);
+  Serial.print("Attempting to start AP, SSID: ");
+  Serial.println(ssid);
+  status = WiFi.beginAP(ssidchar,passchar);
+  delay(10000);
+  Serial.println (status);
+  if (status == WL_CONNECTED || status== WL_AP_LISTENING)  {
+    server.begin(); 
+    Serial.println(status);
+    Serial.println(status);
+    printCurrentNet();
+    connected= true;
+  }
+return connected;
+}
+
+  String getTime(){
+  timeClient.update();
+  time_t now = timeClient.getEpochTime();// -946684800;
+  struct tm timeInfo = *localtime(&now);
+  strftime(fullTime, sizeof(fullTime), "%Y-%m-%dT%H:%M:%S", &timeInfo );
+  return fullTime;
+  }
+  
+
+  void getZoneMoisture(){
+    for (int zone =0;zone<zoneCount;zone ++){
+      int sensorVal=0;
+      int average=0;
+      for(int y=0;y<5;y++){
+      sensorVal =+ analogRead(analogPins[zone]);
+      delay(100);   
+    }  
+  average = (int)sensorVal/5;
+  currentMoisture[zone]= map(average, wet[zone], dry[zone], 100, 0);
+  if (currentMoisture[zone]< trip[zone]){
+    needsWater[zone] = 1;
+  }
+  else{
+    needsWater[zone]=0;
+  }
+moistureCheckTime=millis();
+Serial.println(currentMoisture[zone]);
+Serial.println("MoistureTest");
+}
+}
+void switchValve(int valve){
+  if(isOpen==true){
+    if (valveStatus[valve]==1){
+      digitalWrite(digitalPins[valve],LOW);
+      valveStatus[valve]=0;
+      isOpen=false;
+      openValve = 7;
+  }
+  }
+    else{
+      isOpen=true;
+      startTime = millis();
+      digitalWrite(digitalPins[valve], HIGH);
+      valveStatus[valve]=1;
+      openValve = valve;
+      getTime();
+      lastWatered[openValve]=fullTime;
+      preferences.begin("setup2",false);
+      preferences.putString(zonelastwateredKeys[openValve],String(fullTime));
+      delay(500);
+      preferences.end();
+  }
+}
+
+void getSavedConfig(){
+  bool opened = preferences.begin("setup2",false);
+  delay(100);
+  if (opened==false) {
+    Serial.println("Cannot initialize preferences");
+    Serial.println("Make sure your WiFi firmware version is greater than 0.5.0");
+ }
+
+SSID = preferences.getString("NetworkID");
+Password = preferences.getString("Password");
+strIPAddress = preferences.getString("IPAddress");
+Serial.println("IPAddress=" + strIPAddress);
+Mask = preferences.getString("Mask");
+Gateway = preferences.getString("Gateway");
+DNS1 = preferences.getString("DNS1");
+DNS2 = preferences.getString("DNS2");
+timezoneoffset = preferences.getInt("offset");
+zoneCount = preferences.getInt("zoneCount");
+Serial.println(zoneCount);
+Serial.println(timezoneoffset);
+for (int zones = 0;zones < zoneCount;zones++){
+    zone[zones] = preferences.getString(zoneKeys[zones]);
+    enabled[zones] = preferences.getInt(zoneenabledKeys[zones]);
+    nickname[zones] = preferences.getString(nicknameKeys[zones]);
+    wet[zones] = preferences.getInt(zonewetKeys[zones],22);
+    dry[zones] = preferences.getInt(zonedryKeys[zones],100);
+    trip[zones] = preferences.getInt(zonetripKeys[zones]);
+    runtime[zones] = preferences.getInt(zoneruntimeKeys[zones]);
+    lastWatered[zones]= preferences.getString(zonelastwateredKeys[zones] );
+    Serial.println(zone[zones]);
+    Serial.println(enabled[zones]);
+    Serial.println(nickname[zones]);
+    Serial.println(wet[zones]);  
+    Serial.println(dry[zones]);
+    Serial.println(trip[zones]);  
+    Serial.println(runtime[zones]);
+    Serial.println(lastWatered[zones]);
+    delay(100);
+      
+}
+delay(100);
+preferences.end();
+  }
+
+void updateRunningConfig(){
+  Serial.println("Updating");
+bool opened = preferences.begin("setup2",false);
+ if (opened == false) {
+    Serial.println("Cannot initialize preferences");
+    Serial.println("Make sure your WiFi firmware version is greater than 0.5.0");
+ }
+
+delay(100);
+Serial.println("Saving SSID=" + SSID);
+Serial.println(timezoneoffset);
+preferences.putString("NetworkID",SSID);
+preferences.putString("Password",Password);
+preferences.putString("IPAddress",strIPAddress);
+preferences.putString("Mask",Mask);
+preferences.putString("Gateway",Gateway);
+preferences.putString("DNS1",DNS1);
+preferences.putString("DNS2",DNS2);
+preferences.putInt("offset",timezoneoffset);
+preferences.putInt("zoneCount",zoneCount);
+delay(1000);
+for (int zones = 0;zones < zoneCount;zones++){
+    preferences.putString(zoneKeys[zones],zone[zones]);
+    preferences.putInt(zoneenabledKeys[zones],enabled[zones]);
+    preferences.putString(nicknameKeys[zones],nickname[zones]);
+    preferences.putInt(zonewetKeys[zones],wet[zones]);
+    preferences.putInt(zonedryKeys[zones],dry[zones]);
+    preferences.putInt(zonetripKeys[zones],trip[zones]);
+    preferences.putInt(zoneruntimeKeys[zones], runtime[zones]);
+    preferences.putString(zonelastwateredKeys[zones],lastWatered[zones]);
+    delay(500);
+}
+preferences.end();
+delay(1000);
+NVIC_SystemReset();
+}
+
+
+
